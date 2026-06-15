@@ -2,30 +2,34 @@
 <html lang="zh-TW">
 <head>
     <meta charset="UTF-8">
-    <!-- 關鍵1：設定 Viewport，禁止瀏覽器原生雙擊放大，穩定版面 -->
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=5.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    
+    <meta name="color-scheme" content="only light">
+    <meta name="theme-color" content="#ffffff">
+    
     <title>Transit Map</title>
     
-    <!-- 引入 SVG 縮放套件 -->
     <script src="https://cdn.jsdelivr.net/npm/svg-pan-zoom@3.6.1/dist/svg-pan-zoom.min.js"></script>
-    <!-- 引入 手機觸控手勢套件 Hammer.js -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/hammer.js/2.0.8/hammer.min.js"></script>
     
     <style>
+        /* 2. CSS 層級防護：鎖死全域亮色與白底 */
+        :root { color-scheme: only light; }
+        
         html, body {
             margin: 0;
             padding: 0;
             width: 100%;
             height: 100%;
-            overflow: hidden; /* 防止出現原生滾動條 */
-            background-color: transparent; /* 讓背景透明以融入 Station J 介面 */
+            overflow: hidden;
+            background-color: #ccccccc !important;
+            isolation: isolate; /* 對抗三星反色濾鏡 */
         }
         
         #map-container {
             width: 100%;
             height: 100%;
-            /* 關鍵2：強制關閉瀏覽器原生的觸控行為（如橡皮筋回彈、下拉刷新），將控制權 100% 交給 JS */
-            touch-action: none; 
+            touch-action: none; /* 將觸控權限 100% 交給腳本 */
             -ms-touch-action: none;
         }
     </style>
@@ -38,72 +42,82 @@
 
     <script>
         window.onload = function() {
-            // --- 定義手機觸控與雙指縮放的手勢邏輯 ---
+            var svgElement = document.querySelector('#transit-map');
+            if (!svgElement) {
+                console.error("找不到 ID 為 transit-map 的 SVG 元素，請確認你有貼上 SVG 代碼");
+                return;
+            }
+
+            // =======================================================
+            // 3. 自動注入防深色模式機制 (你不用手動改 SVG 內容了！)
+            // =======================================================
+            
+            // 替 SVG 加上微小的亮度濾鏡，騙過三星瀏覽器的反轉演算法
+            svgElement.style.filter = "brightness(1.001)";
+            
+            // 自動創建一塊無限大的「實體白色畫布」墊在最底層
+            var bgRect = document.createElementNS("http://www.w3.org/2000/svg", "rect");
+            bgRect.setAttribute("x", "-50000");
+            bgRect.setAttribute("y", "-50000");
+            bgRect.setAttribute("width", "100000");
+            bgRect.setAttribute("height", "100000");
+            bgRect.style.setProperty("fill", "#ffffff", "important"); // 強制白底
+            
+            // 將這塊白底安插到 SVG 的最前面 (也就是最底層)
+            svgElement.insertBefore(bgRect, svgElement.firstChild);
+
+            // =======================================================
+            // 4. 下方是處理手機雙指縮放與拖曳的 Hammer.js 邏輯
+            // =======================================================
             var eventsHandler = {
                 haltEventListeners: ['touchstart', 'touchend', 'touchmove', 'touchleave', 'touchcancel'],
                 init: function(options) {
-                    var instance = options.instance,
-                        initialScale = 1,
-                        pannedX = 0,
-                        pannedY = 0;
-
-                    // 初始化 Hammer.js (關鍵3：強制明確宣告啟用 Pinch 與 Pan)
-                    this.hammer = new Hammer(options.svgElement, {
-                        inputClass: Hammer.SUPPORT_POINTER_EVENTS ? Hammer.PointerEventInput : Hammer.TouchInput,
+                    var instance = options.instance;
+                    var hammer = new Hammer.Manager(options.svgElement, {
                         recognizers: [
-                            [Hammer.Pan, { direction: Hammer.DIRECTION_ALL }],
-                            [Hammer.Pinch, { enable: true }] // 強制啟用雙指縮放
+                            [Hammer.Pinch, { enable: true }],
+                            [Hammer.Pan, { direction: Hammer.DIRECTION_ALL }]
                         ]
                     });
 
-                    // 處理雙指縮放 (Pinch)
-                    this.hammer.on('pinchstart pinchmove', function(ev){
-                        if (ev.type === 'pinchstart') {
-                            initialScale = instance.getZoom();
-                            instance.zoomAtPoint(initialScale * ev.scale, {x: ev.center.x, y: ev.center.y});
-                        } else {
-                            instance.zoomAtPoint(initialScale * ev.scale, {x: ev.center.x, y: ev.center.y});
-                        }
+                    // 啟用雙指縮放
+                    var pinch = hammer.get('pinch');
+                    pinch.set({ enable: true });
+
+                    hammer.on('pinch pinchmove', function(e) {
+                        instance.zoomAtPoint(e.scale, {x: e.center.x, y: e.center.y});
                     });
 
-                    // 處理單指拖曳 (Pan)
-                    this.hammer.on('panstart panmove', function(ev){
-                        if (ev.type === 'panstart') {
-                            pannedX = 0;
-                            pannedY = 0;
-                        }
-                        instance.panBy({x: ev.deltaX - pannedX, y: ev.deltaY - pannedY});
-                        pannedX = ev.deltaX;
-                        pannedY = ev.deltaY;
-                    });
+                    // 啟用單指拖曳
+                    hammer.on('pan panmove', function(e) {
+                        instance.panBy({x: e.deltaX - this.prevX, y: e.deltaY - this.prevY});
+                        this.prevX = e.deltaX;
+                        this.prevY = e.deltaY;
+                    }.bind({prevX: 0, prevY: 0}));
 
-                    // 關鍵4：阻止預設的 touchmove 事件，避免畫面跟著滑動卡死
-                    options.svgElement.addEventListener('touchmove', function(e){ e.preventDefault(); }, {passive: false});
+                    hammer.on('panstart', function(e) {
+                        this.prevX = 0;
+                        this.prevY = 0;
+                    }.bind(this));
                 },
-                destroy: function(){
-                    this.hammer.destroy();
-                }
+                destroy: function(){ this.hammer.destroy(); }
             };
 
-            // --- 初始化 svg-pan-zoom ---
+            // 初始化 svg-pan-zoom 設定
             var panZoomMap = svgPanZoom('#transit-map', {
                 zoomEnabled: true,
-                controlIconsEnabled: false, // 隱藏預設的放大縮小 UI 按鈕，讓畫面更純淨
-                fit: false,
-                center: false,
-                minZoom: 0.5,
-                maxZoom: 10,
-                customEventsHandler: eventsHandler // 綁定剛剛寫好的觸控事件
+                controlIconsEnabled: false,
+                fit: true,
+                center: true,
+                customEventsHandler: eventsHandler
             });
 
-            // --- 延遲置中與縮放 ---
+            // 延遲確保置中與渲染成功
             setTimeout(function() {
-                panZoomMap.resize(); // 重新抓取容器尺寸
-                panZoomMap.fit();    // 塞滿容器
-                panZoomMap.center(); // 置中
-                panZoomMap.zoomBy(1); // (可選) 縮小至 85%，讓地圖周圍留點呼吸空間
-                panZoomMap.center(); // 再次置中確認
-            }, 150);
+                panZoomMap.resize();
+                panZoomMap.fit();
+                panZoomMap.center();
+            }, 500);
         };
     </script>
 </body>
